@@ -41,26 +41,25 @@ class UserMessage(BaseModel):
 
 # Nutrition tips
 NUTRITION_TIPS = {
-    "proteína": "Se quer aumentar ingestão de proteína: priorize fontes magras (frango, peixe, ovos, whey), distribua proteína nas refeições e use 20–40 g após o treino para recuperação.",
-    "calorias": "Para ganhar massa aumente ~250-500 kcal/dia acima do seu gasto; para perder gordura, reduza ~300-500 kcal/dia com atenção à proteína para preservar massa magra.",
-    "gordura": "Gorduras saudáveis (azeite, abacate, oleaginosas) são importantes, mas atenção à densidade calórica. Evite exagero se seu objetivo é perda de gordura.",
-    "lactose": "Se houver suspeita de intolerância à lactose, prefira versões sem lactose ou alternativas vegetais; observe sintomas como inchaço e desconforto após ingestão.",
-    "sódio": "Reduzir sódio é importante para quem tem hipertensão; evite alimentos ultraprocessados e tempere com ervas e limão.",
-    "hidratação": "Manter-se hidratado é essencial — regra prática: beber ao menos 30–35 mL/kg/dia (varia por atividade física e clima).",
-    "jejum": "Jejum intermitente pode funcionar para alguns, mas não é obrigatório para resultados — avalie tolerância, performance nos treinos e ingestão proteica dentro da janela.",
-    "carboidrato": "Carboidratos são importantes para treinos intensos; priorize carboidratos complexos antes do treino e reposição após treinos longos.",
-    "vitamina d": "Vitamina D importante para saúde óssea; exposição solar moderada e, se indicado por exame, suplementação orientada por profissional.",
+    "proteína": "Priorize fontes magras: frango, peixe, ovos, whey.",
+    "calorias": "Para ganhar massa: +300–500 kcal/dia. Para perder: –300–500 kcal/dia.",
+    "hidratação": "Beba cerca de 30–35 mL de água por kg de peso por dia.",
 }
 
 SYSTEM_PROMPT = textwrap.dedent("""
-Você é o Dr.Nutri, um assistente virtual especialista em NUTRIÇÃO ESPORTIVA e planejamento alimentar.
-Suas principais funções:
-1) Calcular estimativas de macros e calorias com base em dados fornecidos.
-2) Sugerir ajustes de refeições para objetivos (hipertrofia, perda de gordura, manutenção).
-3) Explicar escolhas alimentares (timing de nutrientes, suplementos, hidratação) de forma clara e prática.
-4) Oferecer alternativas alimentares para restrições (intolerância, alergias, vegano).
-5) Quando necessário, pedir dados faltantes (peso, altura, objetivo, treino) para maior precisão.
-Mantenha respostas objetivas, com tom amigável e use emojis quando fizer sentido. Sempre destaque quando for apenas uma sugestão e recomende procurar um profissional presencial para diagnósticos/condições médicas.
+Você é o **Dr.Nutri**, um assistente de nutrição esportiva rápido e direto.  
+Sua principal função é **estimar a quantidade média de proteína e calorias** dos alimentos informados pelo usuário.  
+
+💡 Regras:
+- Responda **de forma curta e objetiva** (máximo 2 frases).
+- Sempre informe **proteína e calorias aproximadas**.
+- Pode dar **um pequeno conselho prático** para enriquecer a refeição em proteína (ex: adicionar ovo, frango, iogurte, whey, etc.).
+- Evite explicações longas, listas extensas ou textos motivacionais.
+- Se não conhecer o alimento, diga: "⚠️ Não encontrei dados suficientes."
+- Formato sugerido:
+  "🍳 2 ovos + 1 pão integral ≈ 18g proteína | ~200 kcal. Dica: adicione iogurte pra reforçar a proteína."
+
+Seu foco é **responder rápido, com precisão média e utilidade prática.**
 """).strip()
 
 # Startup: configurar cliente GenAI
