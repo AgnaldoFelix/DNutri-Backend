@@ -6,8 +6,10 @@ from typing import List, Dict, Optional, Literal, Any
 import os
 import textwrap
 import logging
+import json
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+import re
 
 # Carrega .env
 load_dotenv()
@@ -38,6 +40,7 @@ class ChatMessage(BaseModel):
 class UserMessage(BaseModel):
     message: str
     chat_history: Optional[List[ChatMessage]] = None
+    intent: Optional[Literal["chat", "calculate_nutrition"]] = "chat"
 
 # Nutrition tips
 NUTRITION_TIPS = {
@@ -46,7 +49,7 @@ NUTRITION_TIPS = {
     "hidratação": "Beba cerca de 30–35 mL de água por kg de peso por dia.",
 }
 
-SYSTEM_PROMPT = textwrap.dedent("""
+SYSTEM_PROMPT_CHAT = textwrap.dedent("""
 Você é o **Dr.Nutri**, um assistente de nutrição esportiva rápido e direto.  
 Sua principal função é **estimar a quantidade média de proteína e calorias** dos alimentos informados pelo usuário.  
 
@@ -60,6 +63,44 @@ Sua principal função é **estimar a quantidade média de proteína e calorias*
   "🍳 2 ovos + 1 pão integral ≈ 18g proteína | ~200 kcal. Dica: adicione iogurte pra reforçar a proteína."
 
 Seu foco é **responder rápido, com precisão média e utilidade prática.**
+""").strip()
+
+# PROMPT específico para cálculo nutricional (JSON apenas) - ATUALIZADO
+SYSTEM_PROMPT_NUTRITION = textwrap.dedent("""
+Você é um assistente nutricional especializado em calcular valores nutricionais.
+Sua ÚNICA tarefa é retornar dados nutricionais em formato JSON.
+
+INSTRUÇÕES ESTRITAS:
+1. Analise o alimento e quantidade fornecidos
+2. Calcule proteína e calorias totais para a quantidade especificada
+3. Retorne APENAS um objeto JSON válido, sem nenhum texto adicional
+4. Formato obrigatório: {"protein": número, "calories": número}
+
+EXEMPLOS EM GRAMAS:
+- Usuário: "Frango grelhado 150g" → {"protein": 31.5, "calories": 165}
+- Usuário: "Arroz branco 200g" → {"protein": 4.8, "calories": 260}
+- Usuário: "Ovo cozido 100g" → {"protein": 13, "calories": 155}
+
+EXEMPLOS EM UNIDADES:
+- Usuário: "1 ovo" → {"protein": 6, "calories": 70}
+- Usuário: "2 ovos" → {"protein": 12, "calories": 140}
+- Usuário: "5 ovos" → {"protein": 30, "calories": 350}
+- Usuário: "1 maçã" → {"protein": 0.3, "calories": 52}
+- Usuário: "2 maçãs" → {"protein": 0.6, "calories": 104}
+- Usuário: "1 pão francês" → {"protein": 4, "calories": 150}
+- Usuário: "3 pães franceses" → {"protein": 12, "calories": 450}
+- Usuário: "1 banana" → {"protein": 1.3, "calories": 89}
+- Usuário: "2 bananas" → {"protein": 2.6, "calories": 178}
+
+EXEMPLOS EM ML (LÍQUIDOS):
+- Usuário: "Leite 200ml" → {"protein": 6.4, "calories": 124}
+- Usuário: "Iogurte natural 150ml" → {"protein": 5, "calories": 90}
+
+NUNCA adicione texto explicativo, emojis ou formatação.
+NUNCA use markdown ou blocos de código.
+SEMPRE retorne apenas o JSON puro.
+
+Se não encontrar dados para o alimento, retorne: {"protein": 0, "calories": 0}
 """).strip()
 
 # Startup: configurar cliente GenAI
@@ -98,8 +139,31 @@ def build_prompt(system_prompt: str, history: Optional[List[ChatMessage]], user_
     lines.append("CURRENT USER QUESTION:")
     lines.append(user_message.strip())
     lines.append("")
-    lines.append("INSTRUCTIONS: Responda de forma clara, prática e com base em evidências. Use emojis quando apropriado.")
+    
+    # Instruções específicas baseadas no tipo de prompt
+    if system_prompt == SYSTEM_PROMPT_NUTRITION:
+        lines.append("INSTRUCTIONS: Retorne APENAS JSON. Nada mais.")
+    else:
+        lines.append("INSTRUCTIONS: Responda de forma clara, prática e com base em evidências. Use emojis quando apropriado.")
+    
     return "\n".join(lines)
+
+def extract_json_from_response(text: str) -> Optional[Dict[str, float]]:
+    """Extrai JSON da resposta da IA de forma robusta"""
+    try:
+        # Remove possíveis blocos de código tipo ```json ... ```
+        clean_text = text.replace('```json', '').replace('```', '').strip()
+
+        # Procura um objeto JSON no texto
+        json_match = re.search(r'\{[\s\S]*\}', clean_text)
+        if json_match:
+            return json.loads(json_match.group(0))
+
+        # Se não achou, tenta fazer parse direto
+        return json.loads(clean_text)
+    except (json.JSONDecodeError, AttributeError, TypeError) as e:
+        logger.exception("Falha ao extrair JSON: %s", e)
+        return None
 
 @app.post("/avaliar")
 async def avaliar_nutricional(user_msg: UserMessage) -> Dict[str, str]:
@@ -107,70 +171,86 @@ async def avaliar_nutricional(user_msg: UserMessage) -> Dict[str, str]:
     if not texto:
         raise HTTPException(status_code=400, detail="Campo 'message' obrigatório.")
 
-    # quick keyword answers
-    lower = texto.lower()
-    for key, tip in NUTRITION_TIPS.items():
-        if key in lower:
-            logger.info(f"Palavra-chave nutricional detectada: {key}")
-            return {"reply": f"Dr.Nutri: {tip}"}
+    # Verifica a intenção da requisição
+    intent = user_msg.intent or "chat"
+    
+    # Se for cálculo nutricional, usa prompt específico
+    if intent == "calculate_nutrition":
+        logger.info(f"Cálculo nutricional solicitado: {texto}")
+        
+        if not GENAI_CONFIGURED or model is None:
+            raise HTTPException(status_code=500, detail="Serviço de IA não disponível.")
 
-    if not GENAI_CONFIGURED or model is None:
-        logger.error("GenAI não configurado — chamada recusada.")
-        raise HTTPException(status_code=500, detail="GenAI não está configurado no servidor (GOOGLE_API_KEY ausente ou inválida).")
-
-    try:
-        prompt_text = build_prompt(SYSTEM_PROMPT, user_msg.chat_history, texto)
-        contents = [{"parts": [prompt_text]}]
-
-        # CHAMADA: sem parâmetros não suportados (removemos 'temperature' porque sua versão do SDK não aceita)
-        # Abaixo, tentamos formas compatíveis com diferentes versões do SDK:
-        response = None
         try:
-            # versão recomendada: passar contents como argumento nomeado
-            response = model.generate_content(contents=contents)
-        except TypeError:
-            # fallback para algumas versões antigas que aceitam só a lista
-            response = model.generate_content(contents)
-        except Exception:
-            # re-raise para ser tratado
+            # Usa prompt específico para cálculo nutricional
+            prompt_text = build_prompt(SYSTEM_PROMPT_NUTRITION, None, texto)
+            response = model.generate_content(prompt_text)
+            
+            # Extrai o texto da resposta
+            reply_text = response.text.strip() if hasattr(response, 'text') else str(response)
+            
+            # Tenta extrair JSON
+            nutrition_data = extract_json_from_response(reply_text)
+            
+            if nutrition_data and isinstance(nutrition_data, dict):
+                protein = nutrition_data.get("protein", 0)
+                calories = nutrition_data.get("calories", 0)
+                
+                # Valida os tipos
+                if isinstance(protein, (int, float)) and isinstance(calories, (int, float)):
+                    logger.info(f"Dados calculados: {protein}g proteína, {calories} kcal")
+                    return {
+                        "reply": json.dumps({
+                            "protein": round(float(protein), 1),
+                            "calories": int(calories)
+                        })
+                    }
+            
+            # Se não conseguiu extrair JSON válido
+            logger.warning(f"Resposta da IA não contém JSON válido: {reply_text}")
+            return {
+                "reply": json.dumps({
+                    "protein": 0,
+                    "calories": 0
+                })
+            }
+
+        except Exception as e:
+            logger.exception("Erro ao processar cálculo nutricional")
+            return {
+                "reply": json.dumps({
+                    "protein": 0,
+                    "calories": 0
+                })
+            }
+
+    # Comportamento normal do chat
+    else:
+        # quick keyword answers (apenas para chat normal)
+        lower = texto.lower()
+        for key, tip in NUTRITION_TIPS.items():
+            if key in lower:
+                logger.info(f"Palavra-chave nutricional detectada: {key}")
+                return {"reply": f"Dr.Nutri: {tip}"}
+
+        if not GENAI_CONFIGURED or model is None:
+            logger.error("GenAI não configurado — chamada recusada.")
+            raise HTTPException(status_code=500, detail="GenAI não está configurado no servidor (GOOGLE_API_KEY ausente ou inválida).")
+
+        try:
+            prompt_text = build_prompt(SYSTEM_PROMPT_CHAT, user_msg.chat_history, texto)
+            response = model.generate_content(prompt_text)
+            
+            # Extract text
+            reply_text = response.text.strip() if hasattr(response, 'text') else str(response)
+            clean_reply = reply_text.strip()
+            return {"reply": f"Dr.Nutri: {clean_reply}"}
+
+        except HTTPException:
             raise
-
-        # Extract text
-        reply_text: Optional[str] = None
-        if hasattr(response, "text") and isinstance(getattr(response, "text"), str):
-            reply_text = response.text
-        elif hasattr(response, "response") and hasattr(response.response, "text"):
-            reply_text = response.response.text
-        elif isinstance(response, dict):
-            if isinstance(response.get("reply"), str):
-                reply_text = response["reply"]
-            elif "output" in response and isinstance(response["output"], list) and response["output"]:
-                first = response["output"][0]
-                if isinstance(first, dict):
-                    content = first.get("content")
-                    if isinstance(content, dict) and isinstance(content.get("parts"), list):
-                        for p in content["parts"]:
-                            if isinstance(p, str) and p.strip():
-                                reply_text = p
-                                break
-                    if not reply_text:
-                        for v in first.values():
-                            if isinstance(v, str) and v.strip():
-                                reply_text = v
-                                break
-            if not reply_text:
-                reply_text = str(response)
-        else:
-            reply_text = str(response)
-
-        clean_reply = reply_text.strip() if isinstance(reply_text, str) else str(reply_text)
-        return {"reply": f"Dr.Nutri: {clean_reply}"}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Erro ao processar mensagem nutricional")
-        raise HTTPException(status_code=500, detail=str(e))
+        except Exception as e:
+            logger.exception("Erro ao processar mensagem nutricional")
+            raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/status")
 async def health_check():
